@@ -50,6 +50,32 @@
 
 **关键点：按钮开启时用户输入不需要任何预处理/过滤**——哪怕用户明说"要女声念白"，wrap/rewrite 也会把人声压住/删掉（这正是实验验证过的最难场景）。
 
+## 🚀 后端怎么调用（一个函数）
+
+**`instrumental_button.py` 是唯一需要接入的入口**：
+
+```python
+from instrumental_button import instrumental_button
+
+# 纯音乐按钮开启时（方案 B，推荐，零成本永不失败）：
+prompt = instrumental_button(user_request_text)
+lyria_request["prompt"] = prompt   # 塞进你们既有的 Lyria 生成请求 → 正常出纯音乐 mp3
+
+# 方案 C（LLM 改写版，需 google-genai + GEMINI_API_KEY）：
+try:
+    prompt = instrumental_button(user_request_text, scheme="C")
+except InstrumentalButtonError:
+    prompt = instrumental_button(user_request_text)  # 失败回落 B
+```
+
+命令行模拟（不用写代码，直接体验按钮行为）：
+
+```bash
+python3 instrumental_button.py                  # 交互式：选 5 个内置样本或自己输入
+python3 instrumental_button.py "来一首粤语老情歌，要有磁性的男声伴唱。"
+python3 instrumental_button.py "..." --scheme C
+```
+
 ## 🎯 两种实现（拿走即用）
 
 ### ⭐ 方案 B（推荐）：系统提示词包裹 —— `scheme_b.py`
