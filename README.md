@@ -1,147 +1,158 @@
-# 纯音乐按钮 · 后端方案（demo）
+# 纯音乐按钮 prompt 服务
 
-> 2026-08-19 交付。完整实验报告见 `report.md`（同目录）；
-> 逐用例实测见 `test_table.md` 与 `test_results.csv`（同目录）。
-> **本文件夹可整体拷走独立运行**：方案 B 零依赖；方案 C 需 `pip install google-genai` + 环境变量 `GEMINI_API_KEY`。
+> 一个可独立部署的后端组件:**用户输入 + 纯音乐开关 → 最终 Lyria prompt**。
+> 生产路径零 key 零依赖毫秒级返回;真实 Lyria 生成是可选的试用能力。
+> 实验依据(100% 服从实测):`../experiments/2026-08-no-vocals/`(报告在 `deliverables/`)。
 
-## 🔑 核心发现（整个方案的地基）
+## ⚡ 接口速查(入参 / 出参 / 默认值)——最重要的一节
 
-**Lyria API 的 prompt 通道前面，本身可能存在一个理解力很强的通用语言模型。**
+**`POST /prompt`**,请求体 JSON。
 
-实测证据：把一段标准"系统提示词"格式的文本（角色设定 + 编号规则 + `<user_input>` 标签包裹用户输入）作为 prompt 发进去，这个前置语言模型会**把规则当指令执行**——包括与用户输入直接冲突的规则（用户明说"要女声念白"，规则说"严禁任何人声"，结果全部生效）。
+> ### ⚠️ `instrumental` 必填,没有默认值!
+> **请求里不带 `instrumental` 字段 → 直接 422 拒绝,服务不会替你猜。**
+> 必须每次显式传:纯音乐按钮按下传 `true`,没按下传 `false`。
+> (另一个必填是 `user_input`;其余三个字段都有默认,不传也行。)
 
-这意味着两件事：
+### 入参(5 个字段)
 
-1. **prompt 字段不是"音乐描述参数"，而是一个 LLM 的指令通道**——可以按写系统提示词的方式跟它对话，而不是只能喂风格标签
-2. **方案 B 的本质**：不需要任何前置 LLM，直接把用户输入包进一段系统提示词发过去，Lyria 前置语言模型自己会理解并执行"纯音乐"规则——**等于免费借用它内部的语言模型做约束执行**
+| 字段 | 必填 | 不传时的默认 | 说明 |
+|---|---|---|---|
+| **`instrumental`** | **✅ 必填** | **无!漏传即 422** | 纯音乐开关。`true` = 加工出纯音乐 prompt;`false` = 用户输入**原样透传** |
+| **`user_input`** | **✅ 必填** | 无,缺失即 422 | 用户原始自然语言请求,如 `"来一首粤语老情歌，要有磁性的男声伴唱"` |
+| `scheme` | 否 | `"B"` | 加工方案(仅 instrumental=true 时生效):`"B"` 包裹(零成本)/ `"C"` Gemini 预改写(需 key)。开关为 false 时**静默忽略** |
+| `generate` | 否 | `false` | `true` 时附带一次真实 Lyria 生成(需 key,十几~几十秒,超时设 **≥120s**) |
+| `fallback_b` | 否 | `true` | 仅 scheme=`"C"` 时生效:改写失败自动回落 B;`false` 则直接报 502 |
 
-（旁证：早期版本 Lyria 会返回对音频的完整结构化自述"复合写法"，喂回复现率极高——前置语言模型的存在早有线索；本轮 B1T 探针另证时间戳类输出格式指令它不执行，可能存在隔离机制，目前系统服从边界在"音乐需求理解"范围内。）
+**最小可用请求(只传两个必填):**
 
-## 📦 这个功能是什么：产品链路与输入输出
-
-用户在"轻度用户音乐生成"功能里想要纯音乐（没人声的背景乐），但 Lyria 没有纯音乐 API 参数。
-**本方案 = 在后端把用户输入加工成带纯音乐规则的 prompt，再走正常 Lyria 生成通道。**
-
-```
-┌─────────┐   ┌──────────────────────┐   ┌────────────┐   ┌──────────┐
-│ 用户     │   │ 后端：纯音乐按钮逻辑   │   │ Lyria API  │   │ 用户     │
-│      │   │ （本 demo 要实现的部分）│   │            │   │      │
-└────┬────┘   └──────────┬───────────┘   └─────┬──────┘   └────▲─────┘
-     │                   │                     │               │
-     │ ①用户输入文本      │ ②加工后的 prompt     │ ③音频结果      │
-     │ + 纯音乐开关开启    │  写入请求的          │ (mp3，无人声)  │
-     ▼                  ▼  prompt 字段         ▼               │
- "来一首粤语老情歌，   ┌──────────────┐    ┌──────────┐        │
-  要有磁性的男声伴唱"──▶│ scheme_b/c  │───▶│ Lyria    │────────┘
-                      └──────────────┘    │ 生成音频  │
-                                          └──────────┘
+```json
+{ "user_input": "来一首粤语老情歌，要有磁性的男声伴唱", "instrumental": true }
 ```
 
-**产品层输入输出**（后端接口视角）：
+### 出参
 
-| | 内容 | 说明 |
-|---|---|---|
-| **输入 ①** | 用户输入文本（自然语言，中英文混合皆可） | 如「来一首最近很火的粤语老情歌，要有磁性的男声伴唱」；可能**明着或暗着要求人声**——本方案可以完全压住这类请求 |
-| **输入 ②** | 纯音乐开关 = true | 按钮按下/选项勾选。false 时不走本逻辑，prompt 原样直发 |
-| **输出 ①** | 纯音乐 mp3 | 与普通生成同格式同时长，无人声、无歌词 |
-| **输出 ②**（副产物） | Lyria 返回的 `generation.txt` | 只有段落标记（如 `[[A0]]`）= 纯音乐成功；出现任何文本行 = 含人声，可做线上监控 |
+**前三个字段——每次响应都有:**
 
-**本模块（scheme_b/scheme_c）的输入输出**：`user_input: str → prompt: str`——就是上图 ①→② 的加工，其余（调 Lyria、传回音频）走后端既有生成链路，本模块不碰。
+- **`prompt`** ★ **核心产物**。最终发给 Lyria 的 prompt,拿去塞进你们自己的生成请求
+- **`scheme`** —— 实际使用的方案:`"B"` / `"C"` / `"B(fallback)"` / `"passthrough"`(= instrumental 为 false 的透传)
+- **`ok`** —— 请求成功即 `true`
 
-**关键点：按钮开启时用户输入不需要任何预处理/过滤**——哪怕用户明说"要女声念白"，wrap/rewrite 也会把人声压住/删掉（这正是实验验证过的最难场景）。
+**后三个字段——只有 `generate=true` 才有值,平时是 `null`(字段本身永远在,判值即可,不用判存在):**
 
-## 🚀 后端怎么调用（一个函数）
+- **`audio`** —— 便捷音频提取:`{ "mime_type": "audio/mp3", "base64": "…" }`;版权静默拦截等空返回时为 `null`
+- **`generation_text`** —— 通常为 `"[[A0]]"`;**出现其他文本 = 含人声**,可作线上监控
+- **`lyria_response`** —— Lyria 原始响应全量(音频 base64),需要哪个字段取哪个
 
-**`instrumental_button.py` 是唯一需要接入的入口**：
+### 默认情况一句话总览(不传任何可选参数时会发生什么)
 
-```python
-from instrumental_button import instrumental_button
+| 你传的 instrumental | 服务做什么 | 返回 scheme | 需 key | 耗时 |
+|---|---|---|---|---|
+| `true`(默认 scheme=B) | 用户输入包进系统提示词规则框 | `"B"` | ❌ | 毫秒级 |
+| `false` | 用户输入原样透传,零加工 | `"passthrough"` | ❌ | 毫秒级 |
 
-# 纯音乐按钮开启时（方案 B，推荐，零成本永不失败）：
-prompt = instrumental_button(user_request_text)
-lyria_request["prompt"] = prompt   # 塞进你们既有的 Lyria 生成请求 → 正常出纯音乐 mp3
-
-# 方案 C（LLM 改写版，需 google-genai + GEMINI_API_KEY）：
-try:
-    prompt = instrumental_button(user_request_text, scheme="C")
-except InstrumentalButtonError:
-    prompt = instrumental_button(user_request_text)  # 失败回落 B
-```
-
-命令行模拟（不用写代码，直接体验按钮行为）：
+## 1. 快速开始
 
 ```bash
-python3 instrumental_button.py                  # 交互式：选 5 个内置样本或自己输入
-python3 instrumental_button.py "来一首粤语老情歌，要有磁性的男声伴唱。"
-python3 instrumental_button.py "..." --scheme C
+cd demo
+pip install -r requirements.txt
+python3 -m instrumental_prompt.run_server --port 8300
+# (等价写法: uvicorn instrumental_prompt.main:app --host 0.0.0.0 --port 8300)
+# 生产路径(instrumental=true+scheme B / 透传)不需要配任何 key
+# 要用 scheme C 或 generate=true 时:cp .env.example .env 并填 key
 ```
 
-## 🎯 两种实现（拿走即用）
+启动后浏览器开 `http://<host>:8300/docs` 可交互试用——请求与响应的完整字段契约都在里面(响应结构由 response_model 声明,可直接当接口文档用)。
 
-### ⭐ 方案 B（推荐）：系统提示词包裹 —— `scheme_b.py`
+## 2. 调用方法(核心)
 
-```python
-from scheme_b import wrap
-
-prompt = wrap("来一首最近很火的粤语老情歌，要有磁性的男声伴唱。")
-# prompt 直接写入 Lyria 请求的 prompt 字段 → 生成
-```
-
-| | |
-|---|---|
-| **输入** | `user_input: str` —— 用户原始自然语言请求（任意语言） |
-| **输出** | `prompt: str` —— 包裹规则框后的最终 prompt，直发 Lyria |
-| **成本** | **零**（纯字符串拼接，无 LLM 调用，无延迟） |
-| **依赖** | **无**（单文件，复制走就能用） |
-| **实测** | **100% 服从**（35/35，含"女声念白""睡前故事"等顽固人声用例） |
-| **风险** | 下游：Lyria 转写层行为无 API 承诺，版本更新可能变（建议保留人声监控，见下） |
-
-### 方案 C（备选）：LLM 预改写 —— `scheme_c.py`
-
-```python
-from scheme_c import rewrite
-
-prompt = rewrite("来一首最近很火的粤语老情歌，要有磁性的男声伴唱。")
-# → "粤语老情歌, 纯音乐" 这样的标签流，直发 Lyria
-```
-
-| | |
-|---|---|
-| **输入** | `user_input: str` —— 用户原始自然语言请求（任意语言） |
-| **输出** | `prompt: str` —— Gemini 改写后的纯音乐标签流（人声词已删除） |
-| **成本** | 每次生成 **+1 次 LLM 调用**（Gemini-3.5-flash） |
-| **依赖** | `google-genai` + 环境变量 `GEMINI_API_KEY` |
-| **实测** | **100% 服从**（41/41） |
-| **风险** | 上游：改写质量随模型波动、语义删减（如改写过狠删至只剩两词）、LLM 服务可用性 |
-
-**两个方案是平行候选非主次**：B 的不确定性在 Lyria 侧行为，C 的不确定性在 LLM 侧改写。组合策略（如 C 失败回落 B）属工程决策，本轮未验证。
-
-## 演示
+### 2.1 `POST /prompt` —— 唯一业务端点
 
 ```bash
-python3 demo.py "用户输入"             # 两条路线都展示（B 免调 API，C 真调 Gemini）
-python3 demo.py "用户输入" --method B  # 只看方案 B
-python3 scheme_b.py "任意输入"          # 方案 B 单模块自测
-python3 scheme_c.py "任意输入"          # 方案 C 单模块自测（真调 Gemini）
+curl -X POST http://localhost:8300/prompt \
+    -H "Content-Type: application/json" \
+    -d '{"user_input": "来一首粤语老情歌，要有磁性的男声伴唱", "instrumental": true}'
 ```
 
-## 原理：为什么 prompt 文本能当 API 用
+响应:
 
-Lyria API **没有纯音乐开关**。请求里的 `instrumental` / `lyrics` / `duration` 字段均不被读取——服务端唯一真正消费的输入是 **prompt 文本**。
+```json
+{ "ok": true, "scheme": "B", "prompt": "你是一个专业的音乐生成助手。……" }
+```
 
-关键机制：Lyria 内部有一层**语言模型转写**（来历：早期版本会返回对音频的完整结构化自述即"复合写法"，团队实测喂回复现率极高；当前版本不再返回自述，但转写层仍在）。它把收到的任意文本转成内部结构化描述再驱动生成。
+**后端集成只需两步**:① POST 拿 `prompt`;② 把它塞进你们自己的 Lyria 生成请求的 prompt 字段,走既有链路。(入参出参明细见顶部「⚡ 接口速查」)
 
-所以"纯音乐按钮"的后端实现 = **把"纯音乐"写成一条规则放进 prompt，赌转写层服从**。实验证明**规则的形式决定服从率**：
+**响应 `scheme` 值域:** `"B"` / `"C"` / `"B(fallback)"` / `"passthrough"`(instrumental=false)。
 
-| 写法 | 服从率 | 问题 |
+**响应形状**:六个字段永远都在——`generate=false` 时 `lyria_response`/`audio`/`generation_text` 为 `null`。取字段判值即可,不用判 key 存在性。
+
+**generate=true 时后三个字段有值:**
+
+```json
+{
+  "lyria_response": { "…Lyria 原始响应全量,音频 base64…" },
+  "audio": { "mime_type": "audio/mp3", "base64": "SUQz…" },
+  "generation_text": "[[A0]]"
+}
+```
+
+`audio` 在版权静默拦截等空返回时为 `null`;`generation_text` 除 `[[A0]]` 段标外出现文本 = 含人声,可作线上监控。
+
+### 2.2 `GET /health`
+
+```json
+{ "ok": true, "model": "lyria-3-pro-preview", "gemini_key_present": true, "key_source": "namespaced" }
+```
+
+不调外部服务。`key_source` 见 FAQ Q2。
+
+### 2.3 错误码
+
+| 场景 | HTTP | body.detail |
 |---|---|---|
-| 裸前缀句（否决） | 84% | **矛盾输入时无法剔除人声意图**：约束与人声请求平级共存，转写层自行取舍；叙事型人声（念白/讲故事）几乎全漏 |
-| **方案 B 包裹** | **100%** | 结构化规则被转写层识别为指令 |
-| **方案 C 改写** | **100%** | 人声词源头删除，根本不进 Lyria |
+| `user_input` 缺失/空白、`instrumental` 漏传、`scheme` 非法 | 422 | FastAPI 校验错误 / 明确中文信息 |
+| token 错(设了 API_TOKEN 才有) | 401 | `unauthorized` |
+| scheme=C 失败且 fallback_b=false | 502 | `scheme_c_failed: …` |
+| Lyria 异常(400 地域/503 负载/网络) | 502 | `lyria_error: …` |
+| generate=true 但未配 key | 500 | `GEMINI_API_KEY 未配置` |
 
-## 工程注意事项
+400(地域/VPN)重试即可;503(高负载)稍后重试;重试策略由调用方定。
 
-1. **版权拦截是静默的**：prompt 含艺人名/歌词引用 → Lyria 返回空 `parts`（无报错无 400）。上游需过滤艺人名或做空返回兜底
-2. **HTTP 400** = 地域/VPN 问题，重试即可；**503** = 高负载，稍后重试
-3. **人声自动监控**：Lyria 返回的 `generation.txt` 除 `[[A0]]` 段标外出现任何文本（尤其 `[19.2:]` 时间戳行）= 含人声。可用于线上监控方案 B 的持续有效性
-4. **纯音乐时间戳不可得**：prompt 层无法让 Lyria 返回段落时间戳（探针实验 15 样本零生效）——时间元数据需求走音频分析侧
+## 3. 部署与安全 FAQ
+
+**Q1:key 放哪?能写死在代码里吗?**
+
+key 只放服务运行环境(env 或 `.env` 文件),**严禁写死在代码里**。原因:① key 进 git 历史即永久泄露(删掉也在历史里);② 交付拷贝/仓库同步时每份副本都带着 key。`.env` 已被 .gitignore 覆盖(本仓库验证过),不会进版本库。
+
+**Q2:服务器上已经有别的 GEMINI_API_KEY(别的服务在用),会冲突吗?**
+
+会,而且默认静默。python-dotenv 不覆盖已存在的环境变量——如果服务器环境里已导出 `GEMINI_API_KEY`,本服务会直接用那个 key(计费进对方项目、权限可能不符)。本服务的隔离做法:**优先读专用变量 `INSTRUMENTAL_PROMPT_GEMINI_API_KEY`**,只在没设专用变量时才回退 `GEMINI_API_KEY`。部署后 `GET /health` 看 `key_source`:`"namespaced"` = 在用专用 key(安全),`"generic"` = 在用机器通用 key(确认那真是你自己的),`"unset"` = 没配。
+
+**Q3:不设鉴权会有什么风险?**
+
+key 本身偷不走(不进 git、不回显于响应),但 `/prompt` 默认开放——陌生人能刷 scheme C / generate=true 烧你的 Gemini 配额。建议:内网部署,或在 `.env` 设 `API_TOKEN=xxx` 开启 Bearer 鉴权(设了之后 `/prompt` 必须带 `Authorization: Bearer xxx`)。
+
+**Q4:`.env` 文件本身怎么防护?**
+
+`chmod 600 .env`(仅运行用户可读)。未来容器化时 .env 不打进镜像。
+
+**Q5:方案 B 和 C 怎么选?**
+
+B(默认):零成本零延迟零依赖,不确定性在 Lyria 转写层行为(版本更新可能变,建议保留 generation_text 人声监控)。C:控制权在上游、人声词源头删除,成本是每次 +1 次 Gemini 调用,风险是改写波动/语义删减。两者实测均 100% 服从(35/35、41/41)。默认 B,C 失败自动回落 B(fallback_b=true)。
+
+**Q6:生成的音乐时长/格式能控制吗?**
+
+本服务不管生成参数——prompt 拿走后,生成请求的所有参数(模型、格式)由调用方自己的链路决定。`generate=true` 仅是试用/对照,模型默认 `lyria-3-pro-preview`。
+
+## 4. 测试
+
+```bash
+cd demo && python3 -m pytest tests/ -v   # 需先 pip install pytest httpx
+```
+
+41 个用例覆盖 config/engine/providers/service/api 五层,不真调外部服务。
+
+## 5. 行为依据
+
+- 核心发现:Lyria prompt 通道前置通用语言模型,系统提示词类音乐需求可被理解执行(B 方案借此零成本约束)
+- 实验归档:`../experiments/2026-08-no-vocals/`(37 条数据集、判定方法、逐用例对照)
+- 交付报告:`../experiments/2026-08-no-vocals/deliverables/report.md`
