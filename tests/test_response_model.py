@@ -38,7 +38,36 @@ def test_openapi_documents_health_response():
 
 def test_small_response_shape_unchanged():
     """挂模型后小响应字段值不变——行为兼容。"""
-    r = client.post("/prompt", json={"user_input": "来一首粤语老情歌", "instrumental": True})
+    r = client.post("/prompt", json={"user_input": "来一首粤语老情歌", "mode": "instrumental"})
     body = r.json()
     assert body["ok"] is True and body["scheme"] == "B"
     assert "<user_input>" in body["prompt"]
+
+
+def test_prompt_request_mode_required():
+    """mode 必填无默认(强制调用方想清楚);instrumental 布尔已退役"""
+    import pytest
+    from pydantic import ValidationError
+    from instrumental_prompt.schemas import PromptRequest
+
+    with pytest.raises(ValidationError):
+        PromptRequest(user_input="x")  # 缺 mode → 422
+
+
+def test_prompt_request_defaults():
+    """验证新字段默认值"""
+    from instrumental_prompt.schemas import PromptRequest
+
+    req = PromptRequest(user_input="x", mode="lyrics")
+    assert req.lyrics_input == "" and req.scheme is None
+    assert req.generate is False and req.fallback_b is True
+
+
+def test_prompt_request_instrumental_field_gone():
+    """旧字段退役:传了也不认(ExtraForbidden 由 model_config 保证)"""
+    import pytest
+    from pydantic import ValidationError
+    from instrumental_prompt.schemas import PromptRequest
+
+    with pytest.raises(ValidationError):
+        PromptRequest(user_input="x", mode="passthrough", instrumental=True)

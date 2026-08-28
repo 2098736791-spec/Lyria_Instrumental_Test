@@ -1,15 +1,25 @@
 """请求/响应模型。"""
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PromptRequest(BaseModel):
-    user_input: str = Field(..., min_length=1, description="用户原始自然语言请求")
-    instrumental: bool = Field(..., description="产品层纯音乐开关;false=原样透传")
-    scheme: str = Field("B", description='仅 instrumental=true 生效:"B" 包裹 / "C" 改写')
+    model_config = ConfigDict(extra="forbid")  # instrumental 布尔已退役,误传即报
+
+    user_input: str = Field(..., min_length=1, description=(
+        "主输入。passthrough/instrumental=完整自然语言描述;"
+        "lyrics=风格描述(对应前端风格框),语义跟随模式"))
+    mode: str = Field(..., description=(
+        '生成模式(必填无默认):"passthrough" 原样透传 / '
+        '"instrumental" 纯音乐(B/C) / "lyrics" 歌词模式(S1/S2)'))
+    lyrics_input: str = Field("", description=(
+        '歌词框原文。仅 mode="lyrics" 允许非空(≤1000 字符,超限 422)'))
+    scheme: Optional[str] = Field(None, description=(
+        '模式内子路由,默认 instrumental→"B"、lyrics→"S2";'
+        'instrumental 可填 "B"/"C",lyrics 可填 "S1"/"S2",passthrough 必须不传'))
     generate: bool = Field(False, description="true 时附带真实 Lyria 生成(需 key,十几~几十秒)")
-    fallback_b: bool = Field(True, description="仅 scheme=C 生效:C 失败自动回落 B")
+    fallback_b: bool = Field(True, description="仅 instrumental+scheme=C 生效:C 失败自动回落 B")
 
 
 class AudioInfo(BaseModel):
@@ -23,7 +33,7 @@ class PromptResponse(BaseModel):
     """POST /prompt 响应;后三项仅 generate=true 时出现"""
 
     ok: bool = Field(..., description="请求成功")
-    scheme: str = Field(..., description='实际使用方案:"B"/"C"/"B(fallback)"/"passthrough"')
+    scheme: str = Field(..., description='实际使用方案:"B"/"C"/"B(fallback)"/"passthrough"/"S1"/"S2"')
     prompt: str = Field(..., description="最终发给 Lyria 的 prompt")
     lyria_response: Optional[dict] = Field(None, description="Lyria 原始响应全量(音频 base64)")
     audio: Optional[AudioInfo] = Field(None, description="便捷音频字段;空返回时为 null")
