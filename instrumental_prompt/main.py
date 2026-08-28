@@ -3,7 +3,7 @@
 启动: uvicorn instrumental_prompt.main:app --host 0.0.0.0 --port 8300
 (在 demo/ 目录下启动,或把 demo/ 加入 PYTHONPATH)
 
-层级:main(router)→ service(编排)→ engine(scheme_b/scheme_c)
+层级:main(router)→ service(编排)→ engine(scheme_b/scheme_c/scheme_lyrics)
                         ↘ providers(gemini/lyria 网络边界)
 模块级 service_process / lyria_generate 是测试注入点。
 """
@@ -17,7 +17,7 @@ from .config import load_config
 from .schemas import HealthResponse, PromptRequest, PromptResponse
 
 app = FastAPI(
-    title="纯音乐按钮 prompt 服务",
+    title="Lyria 提示词处理服务",
     description="(user_input, mode) → 最终 prompt;lyrics 模式带 lyrics_input;generate=true 时附带真实 Lyria 生成",
     version="2.0.0",
 )
